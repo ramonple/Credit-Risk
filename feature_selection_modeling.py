@@ -31,42 +31,84 @@ def calculate_vif(data, bad_flag, bal_variable, bad_bal_variable, vif_threshold,
 
 
 import pandas as pd
+import numpy as np
 import itertools
 
-def generate_interactions(df, feature_groups, operations):
+def generate_interactions(df, feature_groups, operations, max_order=2):
     """
-    df: pandas DataFrame
-    feature_groups: dict of {group_name: [feature_list]}
-    operations: list of functions taking two or three arguments
+    Generate interaction features based on feature groups with smart naming and conditional division.
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        Original dataset.
+    feature_groups : dict
+        Dictionary of {group_name: [feature_list]}.
+    operations : list
+        List of operations: 'add', 'sub', 'mul', 'div'.
+    max_order : int
+        Maximum number of features to combine (2 for pairwise, 3 for triplet).
+    
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame containing newly generated features.
     """
     new_features = pd.DataFrame(index=df.index)
-    
+
+    # Generate combinations within groups
     for group_name, features in feature_groups.items():
-        # pairwise combinations within group
-        for f1, f2 in itertools.combinations(features, 2):
-            for op in operations:
-                try:
-                    new_feat_name = f"{f1}_{op.__name__}_{f2}"
-                    new_features[new_feat_name] = op(df[f1], df[f2])
-                except Exception:
-                    continue
-    
-    # Optionally, cross-group combinations
-    # for group1, group2 in itertools.combinations(feature_groups.keys(), 2):
-    #     ...
-    
+        for order in range(2, max_order+1):
+            for combo in itertools.combinations(features, order):
+                if order == 2:
+                    f1, f2 = combo
+                    for op in operations:
+                        try:
+                            if op == 'add':
+                                new_feat_name = f"{f1}_add_{f2}"
+                                new_features[new_feat_name] = df[f1] + df[f2]
+                            elif op == 'sub':
+                                new_feat_name = f"{f1}_sub_{f2}"
+                                new_features[new_feat_name] = df[f1] - df[f2]
+                            elif op == 'mul':
+                                new_feat_name = f"{f1}_mul_{f2}"
+                                new_features[new_feat_name] = df[f1] * df[f2]
+                            elif op == 'div':
+                                new_feat_name = f"{f1}_div_{f2}"
+                                new_features[new_feat_name] = np.where(
+                                    df[f2] != 0,
+                                    df[f1] / df[f2],
+                                    0
+                                )
+                        except Exception as e:
+                            print(f"Skipping {f1}, {f2} due to error: {e}")
+                elif order == 3:
+                    f1, f2, f3 = combo
+                    # For triplets, only allow multiplication or addition (can customize)
+                    for op in ['add', 'mul']:
+                        try:
+                            if op == 'add':
+                                new_feat_name = f"{f1}_add_{f2}_add_{f3}"
+                                new_features[new_feat_name] = df[f1] + df[f2] + df[f3]
+                            elif op == 'mul':
+                                new_feat_name = f"{f1}_mul_{f2}_mul_{f3}"
+                                new_features[new_feat_name] = df[f1] * df[f2] * df[f3]
+                        except Exception as e:
+                            print(f"Skipping {f1}, {f2}, {f3} due to error: {e}")
+
     return new_features
 
-import numpy as np
-
+# Example usage:
 feature_groups = {
     "demographics": ["Age", "Income", "EmploymentLength"],
     "account_activity": ["NumTransactions", "AvgBalance", "NumProducts"]
 }
 
-operations = [np.add, np.subtract, np.multiply, lambda x,y: x/y]
+operations = ['add', 'sub', 'mul', 'div']
 
-new_features = generate_interactions(df, feature_groups, operations)
-df_extended = pd.concat([df, new_features], axis=1)
+# Generate features
+new_feats = generate_interactions(df, feature_groups, operations, max_order=3)
 
+# Append to original dataset
+df_extended = pd.concat([df, new_feats], axis=1)
 print(df_extended.shape)
