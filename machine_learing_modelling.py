@@ -171,4 +171,14 @@ def train_random_forest(
 
 
 
-    return best_model, searcher.best_params_, metrics_df , fi
+    return best_model, searcher.best_params_, metrics_df , fi    X_full = data[building_feature_after_encoding]
+    pred_prob_full = best_model.predict_proba(X_full)[:, 1]
+    pred_label_full = best_model.predict(X_full)
+    # Add predictions directly to the original dataset
+    scored_data = data.copy()
+    scored_data['pred_prob'] = pred_prob_full
+    scored_data['pred_label'] = pred_label_full
+
+
+
+    return best_model, scored_data, metrics_df , fi
