@@ -1,10 +1,11 @@
 import pickle
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
-from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix
+from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix, roc_curve
 from scipy.stats import ks_2samp
 
 
@@ -19,9 +20,11 @@ def train_random_forest(
     save_model_path=None,
     save_model_name='RF_model.pkl',
     search_method='grid',              # 'grid' or 'random'
-    validation_size=0.2, # validation set size
+    validation_size=0.2,               # validation set size
     random_state=42,
-    max_feature_warning_threshold=300
+    max_feature_warning_threshold=300,
+    plot_roc=True,
+    plot_feature_importance=True
 ):
     """
     Train a Random Forest with advanced features:
@@ -102,25 +105,45 @@ def train_random_forest(
     print("Best Parameters:", searcher.best_params_)
     print(f"Best CV Score ({scoring}): {searcher.best_score_:.4f}")
 
+    # ----------- Training set ----------------
     train_pred_prob = best_model.predict_proba(X_train)[:, 1]
     train_pred_label = best_model.predict(X_train)
 
-    auc_train = roc_auc_score(y_train, train_pred_prob)
-    gini_train = 2 * auc_train - 1
-    ks_train = ks_2samp(train_pred_prob[y_train == 1], train_pred_prob[y_train == 0]).statistic
-    acc_train = accuracy_score(y_train, train_pred_label)
-    cm_train = confusion_matrix(y_train, train_pred_label)
-
-
-    # ----------- Validation set evaluation ----------------
+    # ----------- Validation set  ----------------
     valid_pred_prob = best_model.predict_proba(X_valid)[:, 1]
     valid_pred_label = best_model.predict(X_valid)
 
-    auc_valid = roc_auc_score(y_valid, valid_pred_prob)
-    gini_valid = 2 * auc_valid - 1
-    ks_valid = ks_2samp(valid_pred_prob[y_valid == 1],valid_pred_prob[y_valid == 0]).statistic
-    acc_valid = accuracy_score(y_valid, valid_pred_label)
-    cm_valid = confusion_matrix(y_valid, valid_pred_label)
+    # Metrics function
+    def compute_metrics(y_true, y_pred_label, y_pred_prob):
+        auc_val = roc_auc_score(y_true, y_pred_prob)
+        gini_val = 2 * auc_val - 1
+        ks_val = ks_2samp(y_pred_prob[y_true==1], y_pred_prob[y_true==0]).statistic
+        acc_val = accuracy_score(y_true, y_pred_label)
+        cm_val = confusion_matrix(y_true, y_pred_label)
+        return auc_val, gini_val, ks_val, acc_val, cm_val
+
+    auc_train, gini_train, ks_train, acc_train, cm_train = compute_metrics(y_train, train_pred_label, train_pred_prob)
+    auc_valid, gini_valid, ks_valid, acc_valid, cm_valid = compute_metrics(y_valid, valid_pred_label, valid_pred_prob)
+
+    metrics_df = pd.DataFrame({
+    "Metric": ["AUC", "Gini", "KS", "Accuracy"],
+    "Train": [auc_train, gini_train, ks_train, acc_train],
+    "Validation": [auc_valid, gini_valid, ks_valid, acc_valid]})
+
+    if plot_roc:
+        fpr_train, tpr_train, _ = roc_curve(y_train, train_pred_prob)
+        fpr_val, tpr_val, _ = roc_curve(y_valid, valid_pred_prob)
+
+        plt.figure(figsize=(8,6))
+        plt.plot(fpr_train, tpr_train, label=f'Train ROC (AUC={auc_train:.3f}, Gini={gini_train:.3f})')
+        plt.plot(fpr_val, tpr_val, label=f'Validation ROC (AUC={auc_valid:.3f}, Gini={gini_valid:.3f})')
+        plt.plot([0,1],[0,1],'k--', alpha=0.5)
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve: Train vs Validation')
+        plt.legend(loc='lower right')
+        plt.grid(True)
+        plt.show()
 
     # ----------- Feature Importance ----------------
     fi = pd.DataFrame({
@@ -128,8 +151,14 @@ def train_random_forest(
         "importance": best_model.feature_importances_
     }).sort_values(by="importance", ascending=False)
 
-    print("\nTop 10 important features:")
-    print(fi.head(10))
+    if plot_feature_importance:
+        plt.figure(figsize=(8,6))
+        fi.head(20).plot(kind='barh', x='feature', y='importance', legend=False)
+        plt.title('Top 20 Feature Importances')
+        plt.gca().invert_yaxis()
+        plt.show()
+
+
 
     if save_model_path is not None:
         full_path = save_model_path + "/" + save_model_name
@@ -138,10 +167,5 @@ def train_random_forest(
         print(f"\nModel saved to: {full_path}")
 
 
-
-    metrics_df = pd.DataFrame({
-    "Metric": ["AUC", "Gini", "KS", "Accuracy"],
-    "Train": [auc_train, gini_train, ks_train, acc_train],
-    "Validation": [auc_valid, gini_valid, ks_valid, acc_valid]})
 
     return best_model, searcher.best_params_, metrics_df , fi
