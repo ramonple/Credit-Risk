@@ -151,13 +151,16 @@ def train_random_forest(
         "importance": best_model.feature_importances_
     }).sort_values(by="importance", ascending=False)
 
-    if plot_feature_importance:
-        plt.figure(figsize=(8,6))
-        fi.head(20).plot(kind='barh', x='feature', y='importance', legend=False)
-        plt.title('Top 20 Feature Importances')
-        plt.gca().invert_yaxis()
-        plt.show()
 
+    if plot_feature_importance:
+        top_features = fi.head(20).sort_values(by='importance')  # sort ascending for better visualization
+        plt.figure(figsize=(8,6))
+        plt.barh(top_features['feature'], top_features['importance'], color='skyblue')
+        plt.xlabel('Feature Importance')
+        plt.ylabel('Feature')
+        plt.title('Top 20 Feature Importances')
+        plt.gca().invert_yaxis()  # largest importance on top
+        plt.show()
 
 
     if save_model_path is not None:
