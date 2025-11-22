@@ -9,6 +9,7 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test
 from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix, roc_curve
 from scipy.stats import ks_2samp
 
+import shap
 
 def train_random_forest(
     data,
@@ -333,9 +334,6 @@ def train_xgboost(
         plt.gca().invert_yaxis()
         plt.show()
 
-
-
-    # Scored dataset
     X_full = data[building_feature_after_encoding].copy()
     scored_data = data.copy()
     scored_data['pred_prob'] = best_model.predict_proba(X_full)[:,1]
@@ -349,3 +347,82 @@ def train_xgboost(
         print(f"\nModel saved to: {full_path}")
 
     return best_model, metrics_df, fi, scored_data
+
+
+def shap_explain_model(
+    model,
+    data,
+    feature_list,
+    sample_size=2000,   # reduce computation for large data
+    plot_summary=True,
+    plot_bar=True,
+    plot_single=False,
+    customer_index=None
+):
+    """
+    Generate SHAP explainability for a trained tree model.
+
+    Parameters
+    ----------
+    model : trained model (LightGBM / XGBoost / RandomForest)
+    data  : pd.DataFrame - full dataset
+    feature_list : list of columns used in the model
+    sample_size : int - number of rows to sample for SHAP (speed)
+    plot_summary : bool - SHAP summary plot
+    plot_bar : bool - SHAP bar chart (feature importance)
+    plot_single : bool - SHAP waterfall / force plot for one observation
+    customer_index : int - row index for local explainability
+
+    Returns
+    -------
+    explainer : SHAP explainer object
+    shap_values : SHAP values array
+    """
+
+    # ---------- 1. Prepare data ----------
+    X = data[feature_list].copy()
+
+    # Sampling to speed up SHAP computation
+    if len(X) > sample_size:
+        X_sampled = X.sample(sample_size, random_state=2025)
+    else:
+        X_sampled = X
+
+    # ---------- 2. Create SHAP explainer ----------
+    try:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_sampled)
+    except Exception as e:
+        print("TreeExplainer failed — falling back to KernelExplainer (slow)")
+        background = shap.sample(X_sampled, 200)   # kernel background
+        explainer = shap.KernelExplainer(model.predict_proba, background)
+        shap_values = explainer.shap_values(X_sampled)
+
+    # ---------- 3. Summary (beeswarm) ----------
+    if plot_summary:
+        print("### SHAP Summary Plot (Global Feature Impact)")
+        shap.summary_plot(shap_values, X_sampled)
+
+    # ---------- 4. Bar Plot (Mean abs SHAP) ----------
+    if plot_bar:
+        print("### SHAP Bar Chart (Global Feature Importance)")
+        shap.summary_plot(shap_values, X_sampled, plot_type="bar")
+
+    # ---------- 5. Local Explanation ----------
+    if plot_single:
+
+        if customer_index is None:
+            customer_index = X_sampled.index[0]   # pick one automatically
+
+        print(f"### Local SHAP for Customer index = {customer_index}")
+
+        # get row
+        row = X.loc[[customer_index]]
+        row_values = explainer.shap_values(row)
+
+        try:
+            shap.plots.waterfall(row_values[0][0])  # LGBM / XGB
+        except:
+            shap.waterfall_plot(row_values[0][0])
+
+    return explainer, shap_values
