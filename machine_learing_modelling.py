@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix, roc_curve
 from scipy.stats import ks_2samp
@@ -113,6 +114,10 @@ def train_random_forest(
     valid_pred_prob = best_model.predict_proba(X_valid)[:, 1]
     valid_pred_label = best_model.predict(X_valid)
 
+ 
+    # Combine train + validation
+    scored_data = pd.concat([train_scored, valid_scored], axis=0).reset_index(drop=True)
+
     # Metrics function
     def compute_metrics(y_true, y_pred_label, y_pred_prob):
         auc_val = roc_auc_score(y_true, y_pred_prob)
@@ -151,16 +156,16 @@ def train_random_forest(
         "importance": best_model.feature_importances_
     }).sort_values(by="importance", ascending=False)
 
-
     if plot_feature_importance:
-        top_features = fi.head(20).sort_values(by='importance')  # sort ascending for better visualization
+        top_features = fi.head(20).sort_values(by='importance', ascending=True)  # sort ascending for better visualization
         plt.figure(figsize=(8,6))
         plt.barh(top_features['feature'], top_features['importance'], color='skyblue')
         plt.xlabel('Feature Importance')
         plt.ylabel('Feature')
         plt.title('Top 20 Feature Importances')
-        plt.gca().invert_yaxis()  # largest importance on top
+        plt.gca()  # largest importance on top
         plt.show()
+
 
 
     if save_model_path is not None:
@@ -170,8 +175,7 @@ def train_random_forest(
         print(f"\nModel saved to: {full_path}")
 
 
-
-    return best_model, searcher.best_params_, metrics_df , fi    X_full = data[building_feature_after_encoding]
+    X_full = data[building_feature_after_encoding]
     pred_prob_full = best_model.predict_proba(X_full)[:, 1]
     pred_label_full = best_model.predict(X_full)
     # Add predictions directly to the original dataset
@@ -211,7 +215,7 @@ def train_xgboost(
     """
 
     if len(building_feature_after_encoding) > max_feature_warning_threshold:
-        print(f"⚠ WARNING: Model input has {len(building_feature_after_encoding)} features.")
+        print(f"WARNING: Model input has {len(building_feature_after_encoding)} features.")
 
     # Split for validation
     train_data, valid_data = train_test_split(
@@ -240,7 +244,6 @@ def train_xgboost(
     model = XGBClassifier(
         objective='binary:logistic',
         eval_metric='auc',
-        use_label_encoder=False,
         random_state=random_state,
         n_jobs=n_jobs
     )
@@ -298,10 +301,21 @@ def train_xgboost(
         "Validation": [auc_valid, gini_valid, ks_valid, acc_valid]
     })
 
-    print("\n===== Metrics Comparison =====")
-    print(metrics_df)
-    print("\nTraining Confusion Matrix:\n", cm_train)
-    print("\nValidation Confusion Matrix:\n", cm_valid)
+    # ROC plot
+    if plot_roc:
+        fpr_train, tpr_train, _ = roc_curve(y_train, train_pred_prob)
+        fpr_val, tpr_val, _ = roc_curve(y_valid, valid_pred_prob)
+
+        plt.figure(figsize=(8,6))
+        plt.plot(fpr_train, tpr_train, label=f'Train ROC (AUC={auc_train:.3f}, Gini={gini_train:.3f})')
+        plt.plot(fpr_val, tpr_val, label=f'Validation ROC (AUC={auc_valid:.3f}, Gini={gini_valid:.3f})')
+        plt.plot([0,1],[0,1],'k--', alpha=0.5)
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve: Train vs Validation')
+        plt.legend(loc='lower right')
+        plt.grid(True)
+        plt.show()
 
     # Feature importance
     fi = pd.DataFrame({
@@ -319,21 +333,7 @@ def train_xgboost(
         plt.gca().invert_yaxis()
         plt.show()
 
-    # ROC plot
-    if plot_roc:
-        fpr_train, tpr_train, _ = roc_curve(y_train, train_pred_prob)
-        fpr_val, tpr_val, _ = roc_curve(y_valid, valid_pred_prob)
 
-        plt.figure(figsize=(8,6))
-        plt.plot(fpr_train, tpr_train, label=f'Train ROC (AUC={auc_train:.3f}, Gini={gini_train:.3f})')
-        plt.plot(fpr_val, tpr_val, label=f'Validation ROC (AUC={auc_valid:.3f}, Gini={gini_valid:.3f})')
-        plt.plot([0,1],[0,1],'k--', alpha=0.5)
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC Curve: Train vs Validation')
-        plt.legend(loc='lower right')
-        plt.grid(True)
-        plt.show()
 
     # Scored dataset
     X_full = data[building_feature_after_encoding].copy()
