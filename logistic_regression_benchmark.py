@@ -184,3 +184,132 @@ def train_lr_and_eval_with_topx(
     plt.show()
 
     return model, topx_train_df, topx_test_df
+
+
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+def add_pred_proba_and_monthly_plot(
+    model,
+    df_train: pd.DataFrame,
+    df_test: pd.DataFrame,
+    df_immature: pd.DataFrame,
+    feature_cols: list,
+    target_col: str,              # e.g. "bad_flag" (0/1). df_immature may not have it.
+    month_col: str,               # e.g. "written_month" (datetime or yyyy-mm string)
+    proba_col: str = "pred_proba" # new column to add
+):
+    """
+    1) Adds predicted probability column to train/test/immature DataFrames
+    2) Concatenates them to produce an 'entire timeframe' evaluation DataFrame
+    3) Builds a monthly plotly line chart:
+         - Solid blue: actual monthly bad rate (from rows where target exists)
+         - Dashed red: predicted monthly bad rate (mean predicted proba)
+         - Error bar: ±10% around actual bad rate (relative)
+
+    Returns:
+      df_train_out, df_test_out, df_immature_out, monthly_df, fig
+    """
+
+    def _predict_into(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        X = out[feature_cols]
+        out[proba_col] = model.predict_proba(X)[:, 1]
+        return out
+
+    # --- 1) Add predicted probability to each dataset ---
+    df_train_out = _predict_into(df_train)
+    df_test_out = _predict_into(df_test)
+    df_immature_out = _predict_into(df_immature)
+
+    # --- 2) Combine for "entire timeframe" ---
+    df_all = pd.concat(
+        [
+            df_train_out.assign(_dataset="train"),
+            df_test_out.assign(_dataset="test"),
+            df_immature_out.assign(_dataset="immature"),
+        ],
+        axis=0,
+        ignore_index=True
+    )
+
+    # Ensure month column is month-granular and sortable
+    # If month_col already like "YYYY-MM", this will still work.
+    m = df_all[month_col]
+    if np.issubdtype(m.dtype, np.datetime64):
+        df_all["_month"] = pd.to_datetime(m).dt.to_period("M").dt.to_timestamp()
+    else:
+        # try parse strings like "2024-01" or "2024-01-15"
+        df_all["_month"] = pd.to_datetime(m).dt.to_period("M").dt.to_timestamp()
+
+    # --- 3) Monthly aggregation ---
+    # Predicted monthly bad rate: mean predicted probability (all rows)
+    pred_monthly = (
+        df_all.groupby("_month", as_index=False)[proba_col]
+        .mean()
+        .rename(columns={proba_col: "pred_bad_rate"})
+    )
+
+    # Actual monthly bad rate: only where target is available (train+test typically)
+    has_y = df_all[target_col].notna() if target_col in df_all.columns else pd.Series(False, index=df_all.index)
+    if target_col in df_all.columns:
+        actual_monthly = (
+            df_all.loc[has_y]
+            .groupby("_month", as_index=False)[target_col]
+            .mean()
+            .rename(columns={target_col: "actual_bad_rate"})
+        )
+    else:
+        actual_monthly = pd.DataFrame({"_month": pred_monthly["_month"], "actual_bad_rate": np.nan})
+
+    monthly_df = pred_monthly.merge(actual_monthly, on="_month", how="left").sort_values("_month")
+
+    # Error bar: ±10% around actual bad rate (relative 10%)
+    # (If you meant ±10 percentage points instead, tell me and I’ll change it.)
+    monthly_df["err_10pct_of_actual"] = 0.10 * monthly_df["actual_bad_rate"]
+
+    # --- 4) Plotly figure ---
+    fig = go.Figure()
+
+    # Actual (solid blue) with error bars
+    fig.add_trace(
+        go.Scatter(
+            x=monthly_df["_month"],
+            y=monthly_df["actual_bad_rate"],
+            mode="lines+markers",
+            name="Actual monthly bad rate",
+            line=dict(color="blue", dash="solid"),
+            error_y=dict(
+                type="data",
+                array=monthly_df["err_10pct_of_actual"],
+                visible=True
+            ),
+        )
+    )
+
+    # Predicted (dashed red)
+    fig.add_trace(
+        go.Scatter(
+            x=monthly_df["_month"],
+            y=monthly_df["pred_bad_rate"],
+            mode="lines+markers",
+            name="Predicted monthly bad rate (avg PD)",
+            line=dict(color="red", dash="dash"),
+        )
+    )
+
+    fig.update_layout(
+        title="Monthly bad rate: Actual vs Predicted",
+        xaxis_title="Written month",
+        yaxis_title="Bad rate",
+        hovermode="x unified",
+        template="plotly_white",
+    )
+
+    # Optional: show as percentages on y-axis
+    fig.update_yaxes(tickformat=".2%")
+
+    return df_train_out, df_test_out, df_immature_out, monthly_df, fig
+
