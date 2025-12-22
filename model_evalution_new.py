@@ -120,3 +120,25 @@ def plot_pr_curve_and_topx(
     ax.legend(loc="best")
 
     return topx_df, fig, ax
+
+
+
+def explain_first_topx_row(topx_df: pd.DataFrame):
+    """
+    Print a human-readable explanation for the first row of a Top-X% table.
+    Assumes the table is sorted by top_frac (smallest X first).
+    """
+    row = topx_df.iloc[0]
+
+    msg = (
+        f"For the top {row['top_pct']:.0f}% highest-risk accounts "
+        f"({int(row['k'])} out of {int(row['n'])} total), "
+        f"the observed bad rate is {row['precision_at_top']:.2%}, "
+        f"compared with an overall portfolio bad rate of {row['base_rate']:.2%}. "
+        f"This represents a lift of {row['lift_vs_base_rate']:.1f}× over random selection. "
+        f"These accounts capture {row['recall_at_top']:.1%} of all bad outcomes "
+        f"(3@12)."
+    )
+
+    print(msg)
+
