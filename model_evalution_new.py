@@ -1,3 +1,56 @@
+====================================== summary =================================================
+Model Performance Summary
+
+1. Objective & Scope
+Target: 3@12 delinquency (binary)
+Portfolio: 
+Sample: 
+
+2. Discrimination (Ranking Power)
+ROC-AUC / Gini (Test)
+PR-AUC (Test)
+(Assesses ability to rank bads above goods.)
+
+3. Precision–Recall Operating Point Analysis (Top-X%)
+Precision@X%, Recall@X%, Lift (Test)
+Interpretation of Top-X% capture
+(Assesses risk concentration under fixed capacity.)
+
+4. Calibration & Probability Quality
+Brier score (Test)
+Reliability curve (deciles, Test)
+(Assesses whether predicted PDs are numerically meaningful.)
+
+5. Forecasting Performance (Portfolio-Level)
+Monthly actual vs predicted 3@12 (plot)
+Monthly MAE / RMSE / Bias (Test months)
+(Primary metric for DDM forecasting.)
+
+6. Stability & Segmentation
+Performance stability by written month (Test)
+Key segment checks (e.g. RN band, channel)
+(Ensures robustness and absence of weak pockets.)
+
+7. Explainability
+Feature importance (Top 10)
+SHAP summary plot (Train)
+(Provides transparency and directional validation.)
+
+8. Benchmark Comparison
+ML vs Logistic Regression
+Summary decision
+
+
+9. Conclusion
+Selected model
+Key strengths / limitations
+Recommended next steps
+
+===============================================================================================
+=== reporting function ===
+    
+
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -22,6 +75,8 @@ def plot_pr_curve_and_topx(
         Binary label column name (0/1).
     score_col : str
         Prediction score/probability column name (higher = more risky).
+    
+    
     top_fracs : tuple
         Fractions for Top X% metrics (e.g., 0.10 = top 10%).
     dropna : bool
