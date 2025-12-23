@@ -490,100 +490,191 @@ def monthly_forecast_report(
 
 
 # ======== segment level monthly overview ========
-import pandas as pd
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 
-def segment_monthly_overview(
+def segment_monthly_report_all(
     df: pd.DataFrame,
     segment_cols: list[str],
-    month_col: str,
+    month_col: str,                 # datetime like 2024-01-01
     y_col: str = "bad_flag",
     p_col: str = "pred_proba",
-    weight_col: str | None = None,
-    month_as_period: bool = True,
+    band_pct: float = 0.10,         # shaded range around actual (relative)
+    show_last_n_months: int | None = None,  # None => show all months
+    max_segments: int | None = None,        # safety: limit number of segment plots
 ):
     """
-    Segment-level monthly overview:
-      - predicted monthly bad rate = avg(pred_proba) (weighted if weight_col provided)
-      - actual monthly bad rate = avg(bad_flag) for rows where bad_flag is not null
-      - counts + error
+    For each segment group (unique combination of segment_cols):
+      1) Build monthly table: n, n_labeled, actual_bad_rate, pred_bad_rate, error
+      2) Display formatted table (%)
+      3) Show Plotly line chart: actual vs predicted + shaded band
+    Returns a dict with all outputs.
 
-    Works even if future/immature months have bad_flag = NaN.
-
-    Returns
-    -------
-    pd.DataFrame with one row per (segment(s), month):
-      segment cols..., month, n, n_labeled, pred_bad_rate, actual_bad_rate, error
+    Notes:
+    - Uses month_col directly (must be datetime-like).
+    - Handles immature months (y_col NaN) naturally.
     """
 
-    use_cols = segment_cols + [month_col, p_col]
-    if y_col in df.columns:
-        use_cols.append(y_col)
-    if weight_col:
-        use_cols.append(weight_col)
+    # Notebook display support (optional)
+    try:
+        from IPython.display import display  # type: ignore
+    except Exception:
+        display = None
 
-    use = df[use_cols].copy()
+    # Basic checks
+    needed = set(segment_cols + [month_col, p_col])
+    if y_col in df.columns:
+        needed.add(y_col)
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    use = df[segment_cols + [month_col, p_col] + ([y_col] if y_col in df.columns else [])].copy()
+    use[month_col] = pd.to_datetime(use[month_col])
     use[p_col] = pd.to_numeric(use[p_col], errors="coerce")
     if y_col in use.columns:
         use[y_col] = pd.to_numeric(use[y_col], errors="coerce")
 
-    # normalize month to month start for clean grouping
-    if month_as_period:
-        use["_month"] = pd.to_datetime(use[month_col]).dt.to_period("M").dt.to_timestamp()
-    else:
-        use["_month"] = use[month_col]
-
-    # weighted mean helper
-    def wmean(x, w):
-        x = np.asarray(x, dtype=float)
-        w = np.asarray(w, dtype=float)
-        m = np.isfinite(x) & np.isfinite(w)
-        if m.sum() == 0:
-            return np.nan
-        return float(np.sum(x[m] * w[m]) / np.sum(w[m]))
-
-    group_keys = segment_cols + ["_month"]
-
-    # predicted monthly bad rate (all rows)
-    if weight_col:
-        pred = (use.groupby(group_keys, as_index=False)
-                  .apply(lambda g: pd.Series({
-                      "n": len(g),
-                      "pred_bad_rate": wmean(g[p_col], g[weight_col])
-                  }))
-                  .reset_index(drop=True))
-    else:
-        pred = (use.groupby(group_keys, as_index=False)
+    # Helper: compute monthly table for one group
+    def _monthly_table(g: pd.DataFrame) -> pd.DataFrame:
+        # predicted rate
+        pred = (g.groupby(month_col, as_index=False)
                   .agg(n=(p_col, "size"),
                        pred_bad_rate=(p_col, "mean")))
 
-    # actual monthly bad rate (only labeled rows)
-    if y_col in use.columns:
-        labeled = use[use[y_col].notna()].copy()
-
-        if weight_col:
-            act = (labeled.groupby(group_keys, as_index=False)
-                        .apply(lambda g: pd.Series({
-                            "n_labeled": len(g),
-                            "actual_bad_rate": wmean(g[y_col], g[weight_col])
-                        }))
-                        .reset_index(drop=True))
+        # actual rate (labeled rows only)
+        if y_col in g.columns:
+            gl = g[g[y_col].notna()]
+            act = (gl.groupby(month_col, as_index=False)
+                     .agg(n_labeled=(y_col, "size"),
+                          actual_bad_rate=(y_col, "mean")))
         else:
-            act = (labeled.groupby(group_keys, as_index=False)
-                        .agg(n_labeled=(y_col, "size"),
-                             actual_bad_rate=(y_col, "mean")))
-    else:
-        act = pred[group_keys].copy()
-        act["n_labeled"] = 0
-        act["actual_bad_rate"] = np.nan
+            act = pd.DataFrame({month_col: pred[month_col], "n_labeled": 0, "actual_bad_rate": np.nan})
 
-    out = pred.merge(act, on=group_keys, how="left")
-    out["error"] = out["pred_bad_rate"] - out["actual_bad_rate"]
+        out = pred.merge(act, on=month_col, how="left").sort_values(month_col).reset_index(drop=True)
+        out["error"] = out["pred_bad_rate"] - out["actual_bad_rate"]
+        return out
 
-    # sort for readability
-    out = out.sort_values(group_keys).reset_index(drop=True)
+    # Helper: format table as %
+    def _format_table(t: pd.DataFrame) -> pd.DataFrame:
+        show = t.copy()
+        show[month_col] = pd.to_datetime(show[month_col]).dt.strftime("%Y-%m")
 
-    return out
+        for c in ["actual_bad_rate", "pred_bad_rate", "error"]:
+            if c in show.columns:
+                show[c] = show[c].map(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+        # keep counts as ints if possible
+        for c in ["n", "n_labeled"]:
+            if c in show.columns:
+                show[c] = show[c].fillna(0).astype(int)
+        return show[[month_col, "n", "n_labeled", "actual_bad_rate", "pred_bad_rate", "error"]]
+
+    # Helper: plotly chart
+    def _plot_table(t: pd.DataFrame, title: str) -> go.Figure:
+        tt = t.copy()
+        tt = tt.sort_values(month_col)
+
+        tt["actual_lower"] = tt["actual_bad_rate"] * (1 - band_pct)
+        tt["actual_upper"] = tt["actual_bad_rate"] * (1 + band_pct)
+
+        fig = go.Figure()
+
+        # shaded band (only makes sense where actual exists; Plotly will skip NaNs)
+        fig.add_trace(go.Scatter(
+            x=tt[month_col], y=tt["actual_upper"],
+            mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip"
+        ))
+        fig.add_trace(go.Scatter(
+            x=tt[month_col], y=tt["actual_lower"],
+            mode="lines", line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(0, 0, 255, 0.15)",
+            name=f"Actual ±{int(band_pct*100)}% band",
+            hoverinfo="skip",
+        ))
+
+        # actual
+        fig.add_trace(go.Scatter(
+            x=tt[month_col], y=tt["actual_bad_rate"],
+            mode="lines+markers",
+            name="Actual monthly bad rate",
+            line=dict(color="blue", dash="solid"),
+        ))
+
+        # predicted
+        fig.add_trace(go.Scatter(
+            x=tt[month_col], y=tt["pred_bad_rate"],
+            mode="lines+markers",
+            name="Predicted monthly bad rate (avg PD)",
+            line=dict(color="red", dash="dash"),
+        ))
+
+        fig.update_layout(
+            title=title,
+            xaxis_title="Written month",
+            yaxis_title="Bad rate",
+            hovermode="x unified",
+            template="plotly_white",
+        )
+        fig.update_yaxes(tickformat=".2%")
+
+        return fig
+
+    # ---- iterate over segment groups ----
+    results = {}
+    grouped = use.groupby(segment_cols, dropna=False)
+
+    group_keys = list(grouped.groups.keys())
+    if max_segments is not None:
+        group_keys = group_keys[:max_segments]
+
+    for key in group_keys:
+        # key is scalar if 1 segment col, else tuple
+        if len(segment_cols) == 1:
+            seg_label = f"{segment_cols[0]}={key}"
+            mask_key = (key,)
+        else:
+            seg_label = ", ".join([f"{c}={v}" for c, v in zip(segment_cols, key)])
+            mask_key = key
+
+        g = grouped.get_group(mask_key)
+
+        monthly_tbl = _monthly_table(g)
+
+        # Optionally limit printed rows
+        monthly_tbl_to_show = monthly_tbl
+        if show_last_n_months is not None and len(monthly_tbl) > show_last_n_months:
+            monthly_tbl_to_show = monthly_tbl.tail(show_last_n_months)
+
+        monthly_display = _format_table(monthly_tbl_to_show)
+
+        title = f"Monthly 3@12: Actual vs Predicted ({seg_label})"
+        fig = _plot_table(monthly_tbl, title=title)
+
+        # --- display ---
+        print("\n" + "=" * 90)
+        print(f"SEGMENT: {seg_label}")
+        print("=" * 90)
+
+        if display is not None:
+            display(monthly_display)
+        else:
+            print(monthly_display.to_string(index=False))
+
+        fig.show()
+
+        # store outputs
+        results[seg_label] = {
+            "monthly_numeric": monthly_tbl,
+            "monthly_display": monthly_display,
+            "figure": fig,
+            "n_rows": len(g),
+        }
+
+    return results
+
 
 # ===== Runner: one function to run everything =====
 def run_full_evaluation(
