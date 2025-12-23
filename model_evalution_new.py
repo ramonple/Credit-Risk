@@ -251,61 +251,75 @@ def monthly_error_kpis(monthly_df, actual_col="actual_bad_rate", pred_col="pred_
 import numpy as np
 import pandas as pd
 
-def monthly_forecast_kpis(
+def monthly_forecast_report(
     df: pd.DataFrame,
     month_col: str,
     y_col: str = "bad_flag",
     p_col: str = "pred_proba",
     weight_col: str | None = None,
+    split_col: str | None = None,
+    split_for_kpi: tuple[str, ...] | None = ("test",),  # compute overall KPIs using these splits; set None to use all labeled rows
     month_as_period: bool = True,
     print_report: bool = True,
+    show_last_n_months: int = 12,
 ):
     """
-    Build monthly actual vs predicted default-rate table + monthly and overall forecast KPIs.
+    End-to-end monthly forecasting report from a scored dataset.
 
-    Inputs
-    ------
-    df : DataFrame
-        Must include month_col, p_col, and (for labeled months) y_col.
-        Immature months can have y_col = NaN.
+    What it does
+    ------------
+    1) Builds a monthly table across ALL months in df:
+         - n (total), n_labeled (with y)
+         - actual_bad_rate (mean y), pred_bad_rate (mean predicted proba)
+         - error, abs_error, sq_error
+       Immature months are handled naturally (actual is NaN => errors NaN).
+
+    2) Computes overall monthly forecast KPIs across labeled months only:
+         - MAE, RMSE, Bias
+       Optionally restricts overall KPI computation to certain dataset splits
+       (e.g. TEST months only) using split_col + split_for_kpi.
+
+    3) Prints:
+         - a tidy monthly table with % formatting
+         - a plain-English explanation of MAE/RMSE/Bias in percentage-point terms
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must include month_col and p_col. y_col can be NaN for immature months.
+        Optional split_col can identify train/test/immature.
     month_col : str
         Written month column (datetime or string).
     y_col : str
-        Binary outcome column (0/1). Can be NaN for immature.
+        Binary outcome (0/1). Can contain NaN for immature.
     p_col : str
         Predicted probability column.
     weight_col : str | None
-        Optional weights (e.g., balance). If provided, rates become weighted averages.
+        Optional weights (e.g. balance) for weighted monthly rates.
+    split_col : str | None
+        Optional column like 'dataset_split' with values 'train','test','immature'.
+    split_for_kpi : tuple[str,...] | None
+        Which splits to use for overall KPI computation.
+        - Default ('test',) => overall KPIs computed from TEST months only.
+        - Set None => use all labeled rows (train+test) for KPI.
     month_as_period : bool
-        If True, normalizes month to month-start timestamps.
+        Normalize month to month-start timestamps.
     print_report : bool
-        If True, prints a tidy report.
+        Print tidy output + explanation.
+    show_last_n_months : int
+        How many months of the monthly table to print (keeps output tidy).
 
     Returns
     -------
-    monthly_df : DataFrame
-        One row per month with:
-          - n (count), n_labeled (count with y)
-          - actual_bad_rate, pred_bad_rate
-          - error, abs_error, sq_error
-    overall_df : DataFrame
-        One row overall KPI computed across labeled months:
-          - MAE, RMSE, Bias
-          - n_months (labeled months), avg_monthly_volume, avg_labeled_volume
+    monthly_df : pd.DataFrame
+        Numeric monthly table (rates in [0,1]).
+    overall_df : pd.DataFrame
+        One-row numeric overall KPI table (rates in [0,1]).
+    monthly_display_df : pd.DataFrame
+        Formatted monthly table (percent strings) for printing/reporting.
     """
 
-    use = df[[month_col, y_col, p_col] + ([weight_col] if weight_col else [])].copy()
-    use[p_col] = pd.to_numeric(use[p_col], errors="coerce")
-    if y_col in use.columns:
-        use[y_col] = pd.to_numeric(use[y_col], errors="coerce")
-
-    # Normalize month
-    if month_as_period:
-        use["_month"] = pd.to_datetime(use[month_col]).dt.to_period("M").dt.to_timestamp()
-    else:
-        use["_month"] = use[month_col]
-
-    # Helper: weighted mean (safe)
+    # ---------- helpers ----------
     def wmean(x, w):
         x = np.asarray(x, dtype=float)
         w = np.asarray(w, dtype=float)
@@ -314,99 +328,196 @@ def monthly_forecast_kpis(
             return np.nan
         return float(np.sum(x[m] * w[m]) / np.sum(w[m]))
 
-    # Build monthly aggregations
+    def pct(x, digits=2):
+        return f"{x:.{digits}%}" if pd.notna(x) else ""
+
+    # ---------- 1) clean & normalize ----------
+    cols = [month_col, p_col]
+    if y_col in df.columns:
+        cols.append(y_col)
+    if weight_col:
+        cols.append(weight_col)
+    if split_col:
+        cols.append(split_col)
+
+    use = df[cols].copy()
+    use[p_col] = pd.to_numeric(use[p_col], errors="coerce")
+    if y_col in use.columns:
+        use[y_col] = pd.to_numeric(use[y_col], errors="coerce")
+
+    # normalize month
+    if month_as_period:
+        use["_month"] = pd.to_datetime(use[month_col]).dt.to_period("M").dt.to_timestamp()
+    else:
+        use["_month"] = use[month_col]
+
+    # ---------- 2) monthly aggregation across ALL months ----------
     rows = []
     for m, g in use.groupby("_month", sort=True):
         n = len(g)
+
+        # predicted monthly rate
         if weight_col:
-            w = g[weight_col]
-            pred_rate = wmean(g[p_col], w)
+            pred_rate = wmean(g[p_col], g[weight_col])
         else:
             pred_rate = float(np.nanmean(g[p_col]))
 
-        labeled = g[g[y_col].notna()]
-        n_labeled = len(labeled)
-        if n_labeled > 0:
-            if weight_col:
-                w_lab = labeled[weight_col]
-                actual_rate = wmean(labeled[y_col], w_lab)
+        # actual monthly rate (only where y exists)
+        if y_col in g.columns:
+            labeled = g[g[y_col].notna()]
+            n_labeled = len(labeled)
+            if n_labeled > 0:
+                if weight_col:
+                    actual_rate = wmean(labeled[y_col], labeled[weight_col])
+                else:
+                    actual_rate = float(labeled[y_col].mean())
             else:
-                actual_rate = float(labeled[y_col].mean())
+                actual_rate = np.nan
         else:
+            n_labeled = 0
             actual_rate = np.nan
 
-        rows.append({
+        # split info (optional): share of rows by split for that month (for debugging/traceability)
+        split_info = None
+        if split_col and split_col in g.columns:
+            split_info = dict(g[split_col].value_counts(dropna=False))
+
+        row = {
             "_month": m,
             "n": n,
             "n_labeled": n_labeled,
             "pred_bad_rate": pred_rate,
             "actual_bad_rate": actual_rate,
-        })
+        }
+        if split_info is not None:
+            # keep it lightweight: store the dominant split label for that month
+            row["dominant_split"] = max(split_info, key=split_info.get)
+        rows.append(row)
 
     monthly_df = pd.DataFrame(rows).sort_values("_month").reset_index(drop=True)
-
-    # Errors (only meaningful where actual exists)
     monthly_df["error"] = monthly_df["pred_bad_rate"] - monthly_df["actual_bad_rate"]
     monthly_df["abs_error"] = monthly_df["error"].abs()
     monthly_df["sq_error"] = monthly_df["error"] ** 2
 
-    # Overall KPIs across labeled months only
-    labeled_months = monthly_df.dropna(subset=["actual_bad_rate", "pred_bad_rate"]).copy()
-    if len(labeled_months) == 0:
-        overall_df = pd.DataFrame([{
-            "MAE": np.nan, "RMSE": np.nan, "Bias": np.nan,
-            "n_months": 0,
-            "avg_monthly_volume": float(monthly_df["n"].mean()) if len(monthly_df) else np.nan,
-            "avg_labeled_volume": np.nan,
-            "note": "No labeled months available to compute overall KPIs."
-        }])
+    # ---------- 3) overall KPIs across labeled months (optionally restricted by split) ----------
+    # Decide which months are eligible for KPI computation:
+    eligible = monthly_df.dropna(subset=["actual_bad_rate", "pred_bad_rate"]).copy()
+
+    if split_col and split_for_kpi is not None:
+        # Keep only months where the underlying rows (with labels) belong to desired splits.
+        # We'll recompute monthly actual/pred using only those rows to avoid mixing splits.
+        desired = set(split_for_kpi)
+        df_kpi = use.copy()
+        df_kpi = df_kpi[df_kpi[split_col].isin(desired)]
+        df_kpi = df_kpi[df_kpi[y_col].notna()]  # labeled rows only
+
+        # recompute monthly for KPI
+        kpi_rows = []
+        for m, g in df_kpi.groupby("_month", sort=True):
+            if weight_col:
+                pred_rate = wmean(g[p_col], g[weight_col])
+                actual_rate = wmean(g[y_col], g[weight_col])
+            else:
+                pred_rate = float(np.nanmean(g[p_col]))
+                actual_rate = float(np.nanmean(g[y_col]))
+            kpi_rows.append({"_month": m, "pred": pred_rate, "actual": actual_rate})
+
+        kpi_months = pd.DataFrame(kpi_rows)
+        if not kpi_months.empty:
+            kpi_months["error"] = kpi_months["pred"] - kpi_months["actual"]
+            mae = float(np.mean(np.abs(kpi_months["error"])))
+            rmse = float(np.sqrt(np.mean(kpi_months["error"] ** 2)))
+            bias = float(np.mean(kpi_months["error"]))
+            n_months = int(len(kpi_months))
+        else:
+            mae = rmse = bias = np.nan
+            n_months = 0
     else:
-        mae = float(labeled_months["abs_error"].mean())
-        rmse = float(np.sqrt(labeled_months["sq_error"].mean()))
-        bias = float(labeled_months["error"].mean())
+        # Use all labeled months from monthly_df
+        if len(eligible) > 0:
+            mae = float(eligible["abs_error"].mean())
+            rmse = float(np.sqrt(eligible["sq_error"].mean()))
+            bias = float(eligible["error"].mean())
+            n_months = int(len(eligible))
+        else:
+            mae = rmse = bias = np.nan
+            n_months = 0
 
-        overall_df = pd.DataFrame([{
-            "MAE": mae,
-            "RMSE": rmse,
-            "Bias": bias,
-            "n_months": int(len(labeled_months)),
-            "avg_monthly_volume": float(monthly_df["n"].mean()),
-            "avg_labeled_volume": float(labeled_months["n_labeled"].mean()),
-        }])
+    overall_df = pd.DataFrame([{
+        "MAE": mae,
+        "RMSE": rmse,
+        "Bias": bias,
+        "n_months": n_months,
+        "weighting": "weighted" if weight_col else "unweighted",
+        "kpi_scope": f"{split_for_kpi}" if (split_col and split_for_kpi is not None) else "all labeled months",
+    }])
 
-    # Optional tidy print
+    # ---------- 4) formatted display table (% strings) ----------
+    monthly_display_df = monthly_df.copy()
+    if np.issubdtype(monthly_display_df["_month"].dtype, np.datetime64):
+        monthly_display_df["_month"] = monthly_display_df["_month"].dt.strftime("%Y-%m")
+
+    for c in ["actual_bad_rate", "pred_bad_rate", "error", "abs_error"]:
+        monthly_display_df[c] = monthly_display_df[c].map(lambda x: pct(x, digits=2))
+    # keep sq_error numeric-like
+    monthly_display_df["sq_error"] = monthly_display_df["sq_error"].map(lambda x: f"{x:.6f}" if pd.notna(x) else "")
+
+    display_cols = ["_month", "n", "n_labeled", "actual_bad_rate", "pred_bad_rate", "error", "abs_error"]
+    if "dominant_split" in monthly_display_df.columns:
+        display_cols.insert(1, "dominant_split")
+    monthly_display_df = monthly_display_df[display_cols]
+
+    # ---------- 5) tidy print + explanation ----------
     if print_report:
-        print("\n" + "=" * 80)
-        title = "MONTHLY FORECAST KPIs (WEIGHTED)" if weight_col else "MONTHLY FORECAST KPIs"
-        print(title)
-        print("=" * 80)
+        print("\n" + "=" * 90)
+        print("MONTHLY DEFAULT-RATE FORECAST REPORT".upper())
+        print("=" * 90)
+        scope_txt = overall_df.loc[0, "kpi_scope"]
+        print(f"KPI scope for overall MAE/RMSE/Bias: {scope_txt}")
+        print(f"Weighting: {overall_df.loc[0, 'weighting']}")
+        print("-" * 90)
 
-        if len(labeled_months):
-            o = overall_df.iloc[0]
+        if n_months == 0 or not np.isfinite(mae):
+            print("Overall KPI summary: Not available (no labeled months in the selected KPI scope).")
+        else:
             print(
-                f"Overall (across labeled months): "
-                f"MAE={o['MAE']:.4%} | RMSE={o['RMSE']:.4%} | Bias={o['Bias']:.4%} | "
-                f"Labeled months={int(o['n_months'])}"
+                f"Overall KPI summary (across {n_months} labeled months): "
+                f"MAE={mae:.4%} | RMSE={rmse:.4%} | Bias={bias:.4%}"
             )
+
+            mae_pp = mae * 100
+            rmse_pp = rmse * 100
+            bias_pp = bias * 100
+
+            print("\nInterpretation (percentage points):")
+            print(
+                f"- MAE {mae:.4%} (~{mae_pp:.2f} pp): "
+                f"on average, the monthly predicted 3@12 rate differs from the actual rate "
+                f"by about {mae_pp:.2f} percentage points."
+            )
+            print(
+                f"- RMSE {rmse:.4%} (~{rmse_pp:.2f} pp): "
+                f"penalizes larger monthly misses more; RMSE close to MAE suggests few extreme outlier months."
+            )
+            if abs(bias_pp) < 0.05:
+                bias_msg = "Bias is close to zero, indicating little systematic over/under prediction."
+            else:
+                direction = "over-predicts" if bias_pp > 0 else "under-predicts"
+                bias_msg = f"On average the model {direction} by about {abs(bias_pp):.2f} percentage points."
+            print(f"- Bias {bias:.4%} (~{bias_pp:.2f} pp): {bias_msg}")
+
+        # monthly table (tidy)
+        print("\n" + "-" * 90)
+        print("Monthly detail (bad rates shown as %):")
+        print("-" * 90)
+
+        if show_last_n_months and len(monthly_display_df) > show_last_n_months:
+            print(monthly_display_df.tail(show_last_n_months).to_string(index=False))
         else:
-            print("Overall: not available (no labeled months).")
+            print(monthly_display_df.to_string(index=False))
 
-        # Print a compact monthly table (last 12 months if long)
-        show = monthly_df.copy()
-        show["_month"] = show["_month"].dt.strftime("%Y-%m")
-        for c in ["actual_bad_rate", "pred_bad_rate", "error", "abs_error"]:
-            show[c] = show[c].map(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-        show["sq_error"] = show["sq_error"].map(lambda x: f"{x:.6f}" if pd.notna(x) else "")
+    return monthly_df, overall_df, monthly_display_df
 
-        # If many months, show last 12 by default (keeps it tidy)
-        if len(show) > 12:
-            print("\nMonthly detail (last 12 months):")
-            print(show.tail(12)[["_month","n","n_labeled","actual_bad_rate","pred_bad_rate","error","abs_error"]].to_string(index=False))
-        else:
-            print("\nMonthly detail:")
-            print(show[["_month","n","n_labeled","actual_bad_rate","pred_bad_rate","error","abs_error"]].to_string(index=False))
-
-    return monthly_df, overall_df
 
 
 # ======== segment level monthly overview ========
