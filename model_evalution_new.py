@@ -490,36 +490,100 @@ def monthly_forecast_report(
 
 
 # ======== segment level monthly overview ========
-def segment_monthly_overview(eval_df, segment_cols, y_col="bad_flag", p_col="pred_proba", month_col="month"):
+import pandas as pd
+import numpy as np
+
+def segment_monthly_overview(
+    df: pd.DataFrame,
+    segment_cols: list[str],
+    month_col: str,
+    y_col: str = "bad_flag",
+    p_col: str = "pred_proba",
+    weight_col: str | None = None,
+    month_as_period: bool = True,
+):
     """
-    Returns a table with, for each segment and month:
-      - actual bad rate (where available)
-      - predicted bad rate (avg PD)
-      - counts
-      - error
+    Segment-level monthly overview:
+      - predicted monthly bad rate = avg(pred_proba) (weighted if weight_col provided)
+      - actual monthly bad rate = avg(bad_flag) for rows where bad_flag is not null
+      - counts + error
+
+    Works even if future/immature months have bad_flag = NaN.
+
+    Returns
+    -------
+    pd.DataFrame with one row per (segment(s), month):
+      segment cols..., month, n, n_labeled, pred_bad_rate, actual_bad_rate, error
     """
-    df = eval_df.copy()
 
-    # predicted monthly
-    pred = (df.groupby(segment_cols + [month_col], as_index=False)
-              .agg(
-                  n=("dataset_split", "size"),
-                  pred_bad_rate=(p_col, "mean")
-              ))
+    use_cols = segment_cols + [month_col, p_col]
+    if y_col in df.columns:
+        use_cols.append(y_col)
+    if weight_col:
+        use_cols.append(weight_col)
 
-    # actual monthly (only where y available)
-    has_y = df[y_col].notna()
-    act = (df.loc[has_y]
-             .groupby(segment_cols + [month_col], as_index=False)
-             .agg(
-                 n_labeled=(y_col, "size"),
-                 actual_bad_rate=(y_col, "mean")
-             ))
+    use = df[use_cols].copy()
+    use[p_col] = pd.to_numeric(use[p_col], errors="coerce")
+    if y_col in use.columns:
+        use[y_col] = pd.to_numeric(use[y_col], errors="coerce")
 
-    out = pred.merge(act, on=segment_cols + [month_col], how="left")
+    # normalize month to month start for clean grouping
+    if month_as_period:
+        use["_month"] = pd.to_datetime(use[month_col]).dt.to_period("M").dt.to_timestamp()
+    else:
+        use["_month"] = use[month_col]
+
+    # weighted mean helper
+    def wmean(x, w):
+        x = np.asarray(x, dtype=float)
+        w = np.asarray(w, dtype=float)
+        m = np.isfinite(x) & np.isfinite(w)
+        if m.sum() == 0:
+            return np.nan
+        return float(np.sum(x[m] * w[m]) / np.sum(w[m]))
+
+    group_keys = segment_cols + ["_month"]
+
+    # predicted monthly bad rate (all rows)
+    if weight_col:
+        pred = (use.groupby(group_keys, as_index=False)
+                  .apply(lambda g: pd.Series({
+                      "n": len(g),
+                      "pred_bad_rate": wmean(g[p_col], g[weight_col])
+                  }))
+                  .reset_index(drop=True))
+    else:
+        pred = (use.groupby(group_keys, as_index=False)
+                  .agg(n=(p_col, "size"),
+                       pred_bad_rate=(p_col, "mean")))
+
+    # actual monthly bad rate (only labeled rows)
+    if y_col in use.columns:
+        labeled = use[use[y_col].notna()].copy()
+
+        if weight_col:
+            act = (labeled.groupby(group_keys, as_index=False)
+                        .apply(lambda g: pd.Series({
+                            "n_labeled": len(g),
+                            "actual_bad_rate": wmean(g[y_col], g[weight_col])
+                        }))
+                        .reset_index(drop=True))
+        else:
+            act = (labeled.groupby(group_keys, as_index=False)
+                        .agg(n_labeled=(y_col, "size"),
+                             actual_bad_rate=(y_col, "mean")))
+    else:
+        act = pred[group_keys].copy()
+        act["n_labeled"] = 0
+        act["actual_bad_rate"] = np.nan
+
+    out = pred.merge(act, on=group_keys, how="left")
     out["error"] = out["pred_bad_rate"] - out["actual_bad_rate"]
-    return out
 
+    # sort for readability
+    out = out.sort_values(group_keys).reset_index(drop=True)
+
+    return out
 
 # ===== Runner: one function to run everything =====
 def run_full_evaluation(
