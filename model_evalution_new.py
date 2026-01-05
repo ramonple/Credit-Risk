@@ -781,6 +781,9 @@ def monthly_forecast_report(
         half = (z * np.sqrt((p_hat * (1 - p_hat) + (z**2) / (4*n)) / n)) / denom
         return (max(0.0, center - half), min(1.0, center + half))
 
+    # -------------------------
+    # 1) Clean and normalize
+    # -------------------------
     cols = [month_col, p_col]
     if y_col in df.columns:
         cols.append(y_col)
@@ -799,6 +802,9 @@ def monthly_forecast_report(
     else:
         use["_month"] = use[month_col]
 
+    # -------------------------
+    # 2) Monthly table (ALL months)
+    # -------------------------
     rows = []
     for m, g in use.groupby("_month", sort=True):
         n_total = len(g)
@@ -848,6 +854,9 @@ def monthly_forecast_report(
     monthly_df["abs_error"] = monthly_df["error"].abs()
     monthly_df["sq_error"] = monthly_df["error"] ** 2
 
+    # -------------------------
+    # 2b) CI + z-score diagnostics
+    # -------------------------
     monthly_df["_k"] = (monthly_df["n"] * monthly_df["actual_bad_rate"]).round()
 
     ci_bounds = monthly_df.apply(
@@ -870,6 +879,9 @@ def monthly_forecast_report(
 
     monthly_df.drop(columns=["_k"], inplace=True)
 
+    # -------------------------
+    # 3) Overall KPIs (labeled months only; optionally restricted to splits)
+    # -------------------------
     if split_col and split_for_kpi is not None:
         desired = set(split_for_kpi)
         df_kpi = use.copy()
@@ -924,6 +936,9 @@ def monthly_forecast_report(
         "ci_coverage_rate": float(monthly_df["pred_in_actual_ci"].mean()) if len(monthly_df) else np.nan,
     }])
 
+    # -------------------------
+    # 4) Display-friendly tables (% formatting)
+    # -------------------------
     monthly_display_df = monthly_df.copy()
     if np.issubdtype(monthly_display_df["_month"].dtype, np.datetime64):
         monthly_display_df["_month"] = monthly_display_df["_month"].dt.strftime("%Y-%m")
@@ -952,10 +967,50 @@ def monthly_forecast_report(
         lambda x: fmt_pct(x, digits=2) if pd.notna(x) else ""
     )
 
+    # -------------------------
+    # 5) Show results + print explanation
+    # -------------------------
     if display is not None:
         display(overall_display_df)
     else:
         print(overall_display_df.to_string(index=False))
+
+    if n_months == 0 or not np.isfinite(mae):
+        explanation = (
+            "Overall monthly forecast KPIs are not available because there are no labeled months "
+            f"in the selected KPI scope ({kpi_scope})."
+        )
+    else:
+        mae_pp = mae * 100
+        rmse_pp = rmse * 100
+        bias_pp = bias * 100
+        coverage_rate = overall_df["ci_coverage_rate"].iloc[0]
+        coverage_pct = coverage_rate * 100 if pd.notna(coverage_rate) else None
+
+        if abs(bias_pp) < 0.05:
+            bias_sentence = "Bias is close to zero, indicating no material systematic over- or under-prediction."
+        else:
+            direction = "over-predicts" if bias_pp > 0 else "under-predicts"
+            bias_sentence = (
+                f"On average the model {direction} the monthly default rate by about "
+                f"{abs(bias_pp):.2f} percentage points."
+            )
+
+        explanation = (
+            f"Interpretation (based on {n_months} labeled months in scope {kpi_scope}):\n"
+            f"- MAE = {mae:.4%} (~{mae_pp:.2f} percentage points): typical month-level difference between predicted "
+            f"and realised 3@12 default rates.\n"
+            f"- RMSE = {rmse:.4%} (~{rmse_pp:.2f} percentage points): similar to MAE suggests no extreme outlier months dominate the error.\n"
+            f"- Bias = {bias:.4%} (~{bias_pp:.2f} percentage points): {bias_sentence}"
+        )
+
+        if coverage_pct is not None:
+            explanation += (
+                f"\n- CI coverage = {coverage_pct:.1f}%: proportion of months where the predicted rate lies within "
+                f"the 95% confidence interval of the realised rate (differences outside the CI are less likely to be sampling noise)."
+            )
+
+    print(explanation)
 
     if show_last_n_months is not None and len(monthly_display_df) > show_last_n_months:
         monthly_to_show = monthly_display_df.tail(show_last_n_months)
@@ -968,6 +1023,7 @@ def monthly_forecast_report(
         print(monthly_to_show.to_string(index=False))
 
     return monthly_df, overall_df, monthly_display_df
+
 
 
 
