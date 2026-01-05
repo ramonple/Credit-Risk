@@ -739,34 +739,21 @@ Legend:
 ❌ = should not use
 
  =============================================================================================
- import numpy as np
+import numpy as np
 import pandas as pd
 
-def monthly_forecast_report_updated(
+def monthly_forecast_report(
     df: pd.DataFrame,
     month_col: str,
     y_col: str = "bad_flag",
     p_col: str = "pred_proba",
     weight_col: str | None = None,
     split_col: str | None = None,
-    split_for_kpi: tuple[str, ...] | None = ("test",),  # set None to use all labeled rows
+    split_for_kpi: tuple[str, ...] | None = ("test",),
     month_as_period: bool = True,
-    show_last_n_months: int | None = 12,  # None => show all
+    show_last_n_months: int | None = 12,
+    alpha: float = 0.05,
 ):
-    """
-    End-to-end monthly forecasting report from a scored dataset (auto-displays tables).
-
-    Update in this version:
-    - Keeps only ONE count column in the final monthly table:
-        * 'n' = number of labeled accounts if labels exist, otherwise total rows
-      (so we drop 'n_labeled' from outputs)
-
-    Notes
-    -----
-    - Immature months: y_col can be NaN => actual rate & errors become NaN.
-    - Overall KPIs computed across labeled months only, optionally restricted to splits.
-    """
-
     try:
         from IPython.display import display  # type: ignore
     except Exception:
@@ -783,9 +770,17 @@ def monthly_forecast_report_updated(
     def fmt_pct(x, digits=2):
         return f"{x:.{digits}%}" if pd.notna(x) else ""
 
-    # -------------------------
-    # 1) Clean and normalize
-    # -------------------------
+    z = 1.959963984540054  # ~norm.ppf(1 - alpha/2)
+
+    def wilson_ci(k, n):
+        if n <= 0 or np.isnan(k):
+            return (np.nan, np.nan)
+        p_hat = k / n
+        denom = 1 + (z**2) / n
+        center = (p_hat + (z**2) / (2*n)) / denom
+        half = (z * np.sqrt((p_hat * (1 - p_hat) + (z**2) / (4*n)) / n)) / denom
+        return (max(0.0, center - half), min(1.0, center + half))
+
     cols = [month_col, p_col]
     if y_col in df.columns:
         cols.append(y_col)
@@ -804,20 +799,15 @@ def monthly_forecast_report_updated(
     else:
         use["_month"] = use[month_col]
 
-    # -------------------------
-    # 2) Monthly table (ALL months)
-    # -------------------------
     rows = []
     for m, g in use.groupby("_month", sort=True):
         n_total = len(g)
 
-        # predicted monthly rate (all rows)
         if weight_col:
             pred_rate_all = wmean(g[p_col], g[weight_col])
         else:
             pred_rate_all = float(np.nanmean(g[p_col]))
 
-        # actual monthly rate (labeled rows only)
         if y_col in g.columns:
             labeled = g[g[y_col].notna()]
             n_lab = len(labeled)
@@ -825,11 +815,11 @@ def monthly_forecast_report_updated(
             if n_lab > 0:
                 if weight_col:
                     actual_rate = wmean(labeled[y_col], labeled[weight_col])
-                    pred_rate = wmean(labeled[p_col], labeled[weight_col])  # align pred to labeled set for fairness
+                    pred_rate = wmean(labeled[p_col], labeled[weight_col])
                 else:
                     actual_rate = float(labeled[y_col].mean())
                     pred_rate = float(np.nanmean(labeled[p_col]))
-                n_out = n_lab  # keep only one count column = labeled count
+                n_out = n_lab
             else:
                 actual_rate = np.nan
                 pred_rate = pred_rate_all
@@ -841,7 +831,7 @@ def monthly_forecast_report_updated(
 
         row = {
             "_month": m,
-            "n": n_out,  # single count column
+            "n": n_out,
             "pred_bad_rate": pred_rate,
             "actual_bad_rate": actual_rate,
         }
@@ -853,13 +843,33 @@ def monthly_forecast_report_updated(
         rows.append(row)
 
     monthly_df = pd.DataFrame(rows).sort_values("_month").reset_index(drop=True)
+
     monthly_df["error"] = monthly_df["pred_bad_rate"] - monthly_df["actual_bad_rate"]
     monthly_df["abs_error"] = monthly_df["error"].abs()
     monthly_df["sq_error"] = monthly_df["error"] ** 2
 
-    # -------------------------
-    # 3) Overall KPIs (labeled months only; optionally restricted to splits)
-    # -------------------------
+    monthly_df["_k"] = (monthly_df["n"] * monthly_df["actual_bad_rate"]).round()
+
+    ci_bounds = monthly_df.apply(
+        lambda r: wilson_ci(r["_k"], r["n"]) if pd.notna(r["actual_bad_rate"]) else (np.nan, np.nan),
+        axis=1
+    )
+    monthly_df["actual_ci_lower"] = [c[0] for c in ci_bounds]
+    monthly_df["actual_ci_upper"] = [c[1] for c in ci_bounds]
+    monthly_df["actual_ci_width"] = monthly_df["actual_ci_upper"] - monthly_df["actual_ci_lower"]
+
+    monthly_df["pred_in_actual_ci"] = (
+        (monthly_df["pred_bad_rate"] >= monthly_df["actual_ci_lower"]) &
+        (monthly_df["pred_bad_rate"] <= monthly_df["actual_ci_upper"])
+    ).astype(int)
+
+    monthly_df["binom_se"] = np.sqrt(
+        monthly_df["actual_bad_rate"] * (1 - monthly_df["actual_bad_rate"]) / monthly_df["n"]
+    )
+    monthly_df["error_z"] = monthly_df["error"] / (monthly_df["binom_se"] + 1e-12)
+
+    monthly_df.drop(columns=["_k"], inplace=True)
+
     if split_col and split_for_kpi is not None:
         desired = set(split_for_kpi)
         df_kpi = use.copy()
@@ -911,61 +921,41 @@ def monthly_forecast_report_updated(
         "MAE": mae,
         "RMSE": rmse,
         "Bias": bias,
+        "ci_coverage_rate": float(monthly_df["pred_in_actual_ci"].mean()) if len(monthly_df) else np.nan,
     }])
 
-    # -------------------------
-    # 4) Display-friendly tables (% formatting)
-    # -------------------------
     monthly_display_df = monthly_df.copy()
     if np.issubdtype(monthly_display_df["_month"].dtype, np.datetime64):
         monthly_display_df["_month"] = monthly_display_df["_month"].dt.strftime("%Y-%m")
 
-    for c in ["actual_bad_rate", "pred_bad_rate", "error", "abs_error"]:
+    for c in ["actual_bad_rate", "pred_bad_rate", "error", "abs_error", "actual_ci_lower", "actual_ci_upper"]:
         monthly_display_df[c] = monthly_display_df[c].map(lambda x: fmt_pct(x, digits=2))
     monthly_display_df["sq_error"] = monthly_display_df["sq_error"].map(lambda x: f"{x:.6f}" if pd.notna(x) else "")
+    monthly_display_df["actual_ci_width"] = monthly_display_df["actual_ci_width"].map(lambda x: fmt_pct(x, digits=2))
+    monthly_display_df["binom_se"] = monthly_display_df["binom_se"].map(lambda x: fmt_pct(x, digits=2))
+    monthly_display_df["error_z"] = monthly_display_df["error_z"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "")
+    monthly_display_df["pred_in_actual_ci"] = monthly_display_df["pred_in_actual_ci"].astype("Int64")
 
-    display_cols = ["_month", "n", "actual_bad_rate", "pred_bad_rate", "error", "abs_error"]
+    core_cols = ["_month", "n", "actual_bad_rate", "pred_bad_rate", "error", "abs_error"]
+    extra_cols = [c for c in monthly_display_df.columns if c not in core_cols]
+    display_cols = core_cols + extra_cols
+
     if "dominant_split" in monthly_display_df.columns:
         display_cols.insert(1, "dominant_split")
+
     monthly_display_df = monthly_display_df[display_cols]
 
     overall_display_df = overall_df.copy()
     for c in ["MAE", "RMSE", "Bias"]:
         overall_display_df[c] = overall_display_df[c].map(lambda x: fmt_pct(x, digits=4) if pd.notna(x) else "")
+    overall_display_df["ci_coverage_rate"] = overall_display_df["ci_coverage_rate"].map(
+        lambda x: fmt_pct(x, digits=2) if pd.notna(x) else ""
+    )
 
-    # -------------------------
-    # 5) Show results + explanation
-    # -------------------------
     if display is not None:
         display(overall_display_df)
     else:
         print(overall_display_df.to_string(index=False))
-
-    if n_months == 0 or not np.isfinite(mae):
-        explanation = (
-            "Overall monthly forecast KPIs are not available because there are no labeled months "
-            f"in the selected KPI scope ({kpi_scope})."
-        )
-    else:
-        mae_pp = mae * 100
-        rmse_pp = rmse * 100
-        bias_pp = bias * 100
-
-        if abs(bias_pp) < 0.05:
-            bias_sentence = "Bias is close to zero, indicating little systematic over/under prediction."
-        else:
-            direction = "over-predicts" if bias_pp > 0 else "under-predicts"
-            bias_sentence = f"On average the model {direction} by about {abs(bias_pp):.2f} percentage points."
-
-        explanation = (
-            f"Interpretation (based on {n_months} labeled months in scope {kpi_scope}):\n"
-            f"- MAE = {mae:.4%} (~{mae_pp:.2f} percentage points): typical month-level miss between predicted "
-            f"and actual 3@12 rate.\n"
-            f"- RMSE = {rmse:.4%} (~{rmse_pp:.2f} percentage points): similar to MAE implies few extreme outlier months.\n"
-            f"- Bias = {bias:.4%} (~{bias_pp:.2f} percentage points): {bias_sentence}"
-        )
-
-    print(explanation)
 
     if show_last_n_months is not None and len(monthly_display_df) > show_last_n_months:
         monthly_to_show = monthly_display_df.tail(show_last_n_months)
@@ -978,6 +968,7 @@ def monthly_forecast_report_updated(
         print(monthly_to_show.to_string(index=False))
 
     return monthly_df, overall_df, monthly_display_df
+
 
 
 
