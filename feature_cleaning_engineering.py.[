@@ -1,0 +1,87 @@
+
+# ==================== deal with missings ================
+import numpy as np
+import pandas as pd
+import re
+
+def impute_by_month_group_mean(
+    df: pd.DataFrame,
+    cols: list[str],
+    month_col: str,
+    invalid_below: float = -7000,
+    extra_invalid_values: list[float | int] | None = None,
+    inplace: bool = False,
+):
+    """
+    Impute selected columns using group (month) mean.
+
+    Rules (per column):
+      1) Treat any value containing letters (a-z/A-Z) as invalid -> set to NaN
+      2) Treat numeric values < invalid_below as invalid -> set to NaN
+      3) Treat values in extra_invalid_values as invalid -> set to NaN
+      4) Convert remaining values to numeric
+      5) Impute NaNs using the mean within each month group
+      6) If a month group mean is NaN (all invalid), fallback to overall column mean
+         If still NaN, fill with 0.0
+
+    Returns:
+      df_out, report_df
+        - df_out: dataframe with imputed columns
+        - report_df: per-column summary counts (invalid letters, invalid below, etc.)
+    """
+    df_out = df if inplace else df.copy()
+
+    extra_invalid_values = extra_invalid_values or []
+
+    # Ensure month column is datetime (grouping key)
+    df_out[month_col] = pd.to_datetime(df_out[month_col])
+
+    report_rows = []
+
+    letter_pat = re.compile(r"[A-Za-z]")
+
+    for c in cols:
+        s_raw = df_out[c]
+
+        # Work on string view for letter detection
+        s_str = s_raw.astype(str)
+
+        has_letters = s_str.str.contains(letter_pat, na=False)
+
+        # Convert to numeric (non-numeric -> NaN)
+        s_num = pd.to_numeric(s_raw, errors="coerce")
+
+        invalid_low = s_num < invalid_below
+        invalid_extra = s_num.isin(extra_invalid_values)
+
+        # Mark invalids as NaN (letters OR low OR extra OR existing NaN)
+        invalid_mask = has_letters | invalid_low | invalid_extra | s_num.isna()
+        s_clean = s_num.mask(invalid_mask, np.nan)
+
+        # Group mean by month
+        group_mean = s_clean.groupby(df_out[month_col]).transform("mean")
+
+        # Overall mean fallback
+        overall_mean = float(np.nanmean(s_clean.to_numpy())) if np.isfinite(np.nanmean(s_clean.to_numpy())) else np.nan
+
+        # Fill: first by group mean, then overall mean, then 0
+        s_imputed = s_clean.fillna(group_mean)
+        if np.isfinite(overall_mean):
+            s_imputed = s_imputed.fillna(overall_mean)
+        s_imputed = s_imputed.fillna(0.0)
+
+        df_out[c] = s_imputed
+
+        report_rows.append({
+            "column": c,
+            "n_rows": int(len(df_out)),
+            "n_letters_replaced": int(has_letters.sum()),
+            "n_below_threshold_replaced": int(invalid_low.fillna(False).sum()),
+            "n_extra_invalid_replaced": int(invalid_extra.fillna(False).sum()),
+            "n_non_numeric_replaced": int(s_num.isna().sum()),
+            "n_total_imputed": int((s_clean.isna()).sum()),
+            "overall_mean_used_if_needed": overall_mean,
+        })
+
+    report_df = pd.DataFrame(report_rows)
+    return df_out, report_df
