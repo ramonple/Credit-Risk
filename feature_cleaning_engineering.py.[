@@ -85,3 +85,126 @@ def impute_by_month_group_mean(
 
     report_df = pd.DataFrame(report_rows)
     return df_out, report_df
+
+
+# ====== New feature creation -- change/trend -----
+import numpy as np
+import pandas as pd
+
+def add_change_features(
+    df: pd.DataFrame,
+    specs: list[dict],
+    *,
+    invalid_values: tuple[float | int, ...] = (-9999, 999),
+    default_min_valid: float | None = None,
+    default_max_valid: float | None = None,
+    clip_pct: float | None = 5.0,   # +/-500%
+    clip_sym: float | None = 2.0,   # +/-200%
+    clip_log: float | None = 5.0,
+    denom_mode: str = "signed",     # "signed" (shift/app), "abs" (shift/|app|)
+    denom_zero: str = "nan",        # "nan" or "eps"
+    eps: float = 1e-12,
+    suffix_abs: str = "_shift",
+    suffix_pct: str = "_pct_change",
+    suffix_sym: str = "_sym_pct_change",
+    suffix_log: str = "_log_change",
+    suffix_dir: str = "_dir",
+    suffix_valid: str = "_chg_valid",
+    inplace: bool = False,
+):
+    """
+    Create change-related features from (current, application, shift) with per-feature valid ranges.
+
+    specs: list[dict], each dict:
+      required:
+        - name: base name for new features
+        - curr: current value col
+        - app:  application value col
+      optional:
+        - shift: absolute change col (curr - app). If missing, computed.
+        - min_valid: values below are treated as missing (NaN)
+        - max_valid: values above are treated as missing (NaN)
+        - invalid_values: override default invalid_values for this feature group (e.g., (-9999, 999, 9999))
+        - denom_mode: override denom_mode per feature ("signed" or "abs")
+
+    denom_mode:
+      - "signed": pct = (curr - app) / app        (keeps sign of denominator; supports negative app values)
+      - "abs":    pct = (curr - app) / |app|     (scale-only; sign comes only from numerator)
+
+    denom_zero:
+      - "nan": if app == 0 -> pct_change = NaN and valid flag = 0
+      - "eps": if app == 0 -> pct_change = (curr-app)/eps (usually not recommended)
+
+    Returns a new DataFrame unless inplace=True.
+    """
+    out = df if inplace else df.copy()
+
+    def _clean(s: pd.Series, min_valid, max_valid, inv_vals) -> pd.Series:
+        s = s.replace(list(inv_vals), np.nan)
+        s = pd.to_numeric(s, errors="coerce")
+        if min_valid is not None:
+            s = s.mask(s < min_valid, np.nan)
+        if max_valid is not None:
+            s = s.mask(s > max_valid, np.nan)
+        return s
+
+    for spec in specs:
+        name = spec["name"]
+        curr_col = spec["curr"]
+        app_col = spec["app"]
+        shift_col = spec.get("shift", None)
+
+        inv_vals = tuple(spec.get("invalid_values", invalid_values))
+        min_valid = spec.get("min_valid", default_min_valid)
+        max_valid = spec.get("max_valid", default_max_valid)
+        denom_mode_i = spec.get("denom_mode", denom_mode)
+
+        curr = _clean(out[curr_col], min_valid, max_valid, inv_vals)
+        app = _clean(out[app_col], min_valid, max_valid, inv_vals)
+
+        if shift_col and shift_col in out.columns:
+            shift = _clean(out[shift_col], min_valid, max_valid, inv_vals)
+        else:
+            shift = curr - app
+
+        out[f"{name}{suffix_abs}"] = shift
+        out[f"{name}{suffix_dir}"] = np.sign(shift).astype("float")
+
+        # ---- pct change (vs application value) ----
+        if denom_mode_i not in {"signed", "abs"}:
+            raise ValueError("denom_mode must be 'signed' or 'abs'")
+
+        denom = app if denom_mode_i == "signed" else np.abs(app)
+
+        if denom_zero == "nan":
+            valid = curr.notna() & app.notna() & (denom != 0)
+        elif denom_zero == "eps":
+            valid = curr.notna() & app.notna()
+            denom = denom.mask(denom == 0, eps)
+        else:
+            raise ValueError("denom_zero must be 'nan' or 'eps'")
+
+        pct = np.where(valid, (curr - app) / (denom + eps), np.nan)
+        if clip_pct is not None:
+            pct = np.clip(pct, -clip_pct, clip_pct)
+
+        out[f"{name}{suffix_pct}"] = pct
+        out[f"{name}{suffix_valid}"] = valid.astype(int)
+
+        # ---- symmetric pct change ----
+        sym_denom = (np.abs(curr) + np.abs(app)) / 2.0
+        sym_valid = curr.notna() & app.notna() & (sym_denom != 0)
+        sym = np.where(sym_valid, (curr - app) / (sym_denom + eps), np.nan)
+        if clip_sym is not None:
+            sym = np.clip(sym, -clip_sym, clip_sym)
+        out[f"{name}{suffix_sym}"] = sym
+
+        # ---- log ratio change (only if both > 0) ----
+        log_valid = curr.notna() & app.notna() & (curr > 0) & (app > 0)
+        logc = np.where(log_valid, np.log((curr + eps) / (app + eps)), np.nan)
+        if clip_log is not None:
+            logc = np.clip(logc, -clip_log, clip_log)
+        out[f"{name}{suffix_log}"] = logc
+
+    return out
+
