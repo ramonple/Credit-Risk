@@ -1,0 +1,196 @@
+
+**1. Foundation / overview questions**
+
+* What would the final output look like for us (a set of rules, an approve/decline decision, or a score)?
+* Given that we already have decline strategies in place, how does this sit alongside what we currently do? Would this framework replace any part of our existing decline strategy, or does it sit on top as an additional layer?
+* Will the framework evaluate our currently implemented rules independently and automatically select which to keep or replace?
+* Would the frameowrk more as something that *makes decisions*, or something that *supports and refines* existing decision logic?
+
+**2. “Approval uplift with zero extra risk” 
+
+* When approval uplift is observed, where does it usually come from — marginal declines, specific score ranges, or particular customer types?
+* What is the precise definition of “risk” here (PD, loss rate, etc.)?
+* When stating “no extra risk,” how is that assessed and validated?
+  Once live, how do teams usually track the performance of customers newly approved through the framework versus the baseline portfolio?
+  Are those customers typically tagged and monitored separately?
+
+**3. Explainable AI**
+
+* What techniques are used for explanation (e.g. human-understandable rules or feature-based methods such as feature importance or SHAP)?
+* If a customer asks why they were declined under this framework, how would that explanation typically be provided? Is that explanation stable enough to use in complaints handling?
+* If a regulator or stakeholder asked why a specific applicant was approved by this approach when they would previously have been declined, how would that explanation be constructed?
+  Are explanations stable and reproducible over time?
+
+**4. Model validation, monitoring, and calibration**
+* Which KPIs are built in for model validation and ongoing monitoring?
+* How often do models need to be recalibrated, and is recalibration automated or user-driven?
+* How would new data sources be incorporated if we introduce additional data in the future?
+
+**5. (Optional – more detailed data science questions)**
+* What modelling techniques underpin the system?
+* How does the system handle missing, inconsistent, or sparse data?
+* Is feature selection automated, and if so, what methods are used?
+* How many features typically survive initial selection?
+
+---
+challenge:
+How to Think About “Challenges” in This Context
+
+A safe challenge usually sounds like one of these:
+
+“One thing we’d want to be careful about is…”
+
+“A potential constraint for us would be…”
+
+“From our operating model, this might be a consideration…”
+
+You’re not disproving them — you’re testing fit and limits.
+
+1. Challenge: “Single-Decision Black Box”
+
+When to raise it:
+If they imply the tool outputs a single approve/decline decision.
+
+Challenge (friendly):
+
+“One thing we’d need to be careful about is relying on a single decision output, as we often need to provide a clear, stable primary reason for declines — especially for complaints and audit.”
+
+Why it’s legitimate
+
+Operational
+
+Regulatory
+
+Not opinion-based
+
+What you’re really testing
+
+Whether explanations are operational or cosmetic
+
+2. Challenge: “Approval Uplift Without Segmentation”
+
+When to raise it:
+If uplift is presented only at portfolio level.
+
+Challenge:
+
+“From our side, we’d likely want to understand which declined segments are being approved, as portfolio-level metrics can mask localized risk.”
+
+Why it’s safe
+
+Standard risk practice
+
+Sounds cautious, not skeptical
+
+3. Challenge: “Zero Extra Risk ≠ No Trade-Offs”
+
+When to raise it:
+If they strongly assert “no extra risk” without nuance.
+
+Challenge:
+
+“In practice, we usually see trade-offs shift across segments or time horizons, so we’d want to be clear where any additional risk might surface, even if average losses remain stable.”
+
+Why it works
+
+You accept the claim conditionally
+
+You introduce realism without confrontation
+
+4. Challenge: “Explainability for Customers ≠ Model Explainability”
+
+When to raise it:
+If they focus on SHAP, feature importance, or visuals.
+
+Challenge:
+
+“One consideration for us is that customer-facing explanations often need to be simple and deterministic, which can be different from model-level explainability.”
+
+What this exposes
+
+Whether they’ve thought beyond data science demos
+
+5. Challenge: “Model Drift & Policy Drift”
+
+When to raise it:
+If they emphasize automation and continuous learning.
+
+Challenge:
+
+“With automated retraining, we’d need comfort that decision logic doesn’t drift in a way that changes decline reasons or policy intent without visibility.”
+
+Why it’s safe
+
+Governance-focused
+
+Aligns with risk leadership concerns
+
+6. Challenge: “Incremental Customers Must Be Monitorable”
+
+When to raise it:
+If monitoring is discussed only in aggregate.
+
+Challenge:
+
+“For us, it would be important that customers approved through the framework can be clearly identified and monitored separately, especially early in rollout.”
+
+This tests
+
+Whether uplift is actually controllable
+
+7. Challenge: “Automation vs Control”
+
+When to raise it:
+If “90% automation” is emphasized.
+
+Challenge:
+
+“High automation is attractive, but we’d want to understand where human review and policy overrides remain, particularly for edge cases.”
+
+Why it’s acceptable
+
+No one argues against controls
+
+8. Challenge: “Template Results vs Our Portfolio”
+
+When to raise it:
+Early, but neutrally.
+
+Challenge:
+
+“Just to calibrate expectations — am I right in assuming the uplift and automation figures shown are based on reference clients rather than our data?”
+
+If they hesitate, leadership notices — not you.
+
+9. The One “Hard but Safe” Challenge
+
+If you’re allowed one sharper challenge:
+
+“From our experience, the hardest part isn’t approving more customers, but explaining and defending those decisions consistently over time. That’s probably where we’d focus most of our evaluation.”
+
+This positions you as experienced, not critical.
+
+What NOT to Challenge Publicly
+
+Save these for internal debrief:
+
+Statistical significance details
+
+Sample bias
+
+Benchmark comparisons
+
+Overfitting risks
+
+Those are real, but not for the vendor meeting.
+
+How to Deliver Challenges Safely
+
+Use conditional language
+
+Tie everything to your operating constraints
+
+Pause after you speak — let them fill the silence
+
+Don’t stack challenges back-to-back
+
