@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score
+from typing import Optional, Tuple, Dict, Any, Iterable
+from sklearn.linear_model import LogisticRegression
 
 # ==========================================================
 #   Generate bins for a series
@@ -31,32 +33,60 @@ def _make_bins(series: pd.Series, n_bins=10, method="quantile", edges=None):
 # ==========================================================
 #   Segment AUC/Gini check by APR bins
 # ==========================================================
-def segment_auc_by_apr(df, apr_col, p_col, y_col, n_bins=10):
+def segment_auc_by_apr(
+    df: pd.DataFrame,
+    apr_col: str,
+    p_col: str,
+    y_col: str,
+    n_bins: int = 10,
+    method: str = "quantile",
+    edges=None,
+):
     """
-    Compute segment-level AUC and Gini by APR  bins.
-    """
-    df = df.copy()
+    Compute segment-level AUC and Gini by APR bins, plus a GLOBAL row.
 
-    # APR quantile bins
-    df["apr_bin"] = pd.qcut(df[apr_col], q=n_bins, duplicates="drop")
+    Requires a helper _make_bins(series, n_bins, method, edges) that returns:
+      (bin_series, edges_out)
+    """
+    d = df[[apr_col, p_col, y_col]].copy()
+
+    # Create APR bins
+    d["apr_bin"], edges_out = _make_bins(d[apr_col], n_bins=n_bins, method=method, edges=edges)
 
     rows = []
-    for b, g in df.groupby("apr_bin"):
-        # Need both classes present to compute AUC
+
+    # --- Global performance row ---
+    if d[y_col].nunique() < 2:
+        global_auc = np.nan
+    else:
+        global_auc = roc_auc_score(d[y_col], d[p_col])
+
+    rows.append({
+        "apr_bin": "GLOBAL",
+        "count": len(d),
+        "event_rate": float(d[y_col].mean()),
+        "auc": global_auc,
+        "gini": None if np.isnan(global_auc) else 2 * global_auc - 1,
+    })
+
+    # --- Segment rows ---
+    for b, g in d.groupby("apr_bin", observed=True):
         if g[y_col].nunique() < 2:
             auc = np.nan
         else:
             auc = roc_auc_score(g[y_col], g[p_col])
 
         rows.append({
-            "apr_bin": b,
+            "apr_bin": str(b),
             "count": len(g),
-            "event_rate": g[y_col].mean(),
+            "event_rate": float(g[y_col].mean()),
             "auc": auc,
-            "gini": None if np.isnan(auc) else 2 * auc - 1
+            "gini": None if np.isnan(auc) else 2 * auc - 1,
         })
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    return out, edges_out
+
 
 
 
@@ -185,4 +215,107 @@ def plot_residual_vs_apr(resid_summary_df: pd.DataFrame, title="Mean residual vs
 #
 # resid_sum, resid_edges = residual_summary_by_apr(df, "APR", "p_hat", "take_up", n_bins=25, method="quantile")
 # plot_residual_vs_apr(resid_sum, title="Binned mean residual vs APR")
+
+
+
+
+# ==========================================================
+#   calibrate/modify predictions by APR bins
+# ==========================================================
+def _clip_prob(p, eps=1e-6):
+    p = np.asarray(p, dtype=float)
+    return np.clip(p, eps, 1 - eps)
+
+def _logit(p, eps=1e-6):
+    p = _clip_prob(p, eps)
+    return np.log(p / (1 - p))
+
+def _sigmoid(z):
+    z = np.asarray(z, dtype=float)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def modify_predictions_by_apr_ranges(
+    df: pd.DataFrame,
+    apr_col: str,
+    p_col: str,
+    y_col: str,
+    apr_ranges,
+    mode: str = "logit_shift",   # "mean_scale" | "logit_shift" | "platt"
+    convert_threshold=None,
+    out_proba_col: str = "p_adj",
+    out_flag_col: str = "y_adj",
+    eps: float = 1e-6,
+):
+    """
+    Modify predicted probabilities only within explicitly defined APR ranges.
+    
+    Mean scaling: 
+       multiplies predicted probabilities in the selected APR range 
+       by a constant so the average predicted take-up matches the observed take-up.
+
+    Log-odds (logit) shift:
+       adds a constant to the log-odds of the predicted probabilities, 
+       correcting systematic over- or under-confidence while preserving ranking.
+
+    Platt scaling:
+         fits a small logistic regression on the model’s scores within the APR range 
+         to re-map scores to calibrated probabilities, adjusting both level and confidence.
+
+
+    apr_ranges: list of dicts with keys:
+      - name (str)
+      - min (float or None)
+      - max (float or None)
+    """
+    df_out = df.copy()
+    p = _clip(df[p_col].values, eps)
+    y = df[y_col].values.astype(int)
+    s = _logit(p, eps)
+
+    params = {}
+
+    for r in apr_ranges:
+        name = r.get("name", "range")
+        lo = r.get("min", None)
+        hi = r.get("max", None)
+
+        mask = np.ones(len(df_out), dtype=bool)
+        if lo is not None:
+            mask &= df_out[apr_col].values >= lo
+        if hi is not None:
+            mask &= df_out[apr_col].values < hi
+
+        if mask.sum() == 0:
+            continue
+
+        pg, yg, sg = p[mask], y[mask], s[mask]
+
+        if mode == "mean_scale":
+            k = float(np.mean(yg) / np.mean(pg)) if np.mean(pg) > 0 else 1.0
+            p[mask] = _clip(k * pg, eps)
+            params[name] = {"k": k}
+
+        elif mode == "logit_shift":
+            delta = float(_logit(np.mean(yg), eps) - _logit(np.mean(pg), eps))
+            p[mask] = _clip(_sigmoid(sg + delta), eps)
+            params[name] = {"delta": delta}
+
+        elif mode == "platt":
+            if len(np.unique(yg)) < 2:
+                delta = float(_logit(np.mean(yg), eps) - _logit(np.mean(pg), eps))
+                a, b = delta, 1.0
+            else:
+                lr = LogisticRegression(max_iter=2000)
+                lr.fit(sg.reshape(-1, 1), yg)
+                a, b = float(lr.intercept_[0]), float(lr.coef_[0][0])
+            p[mask] = _clip(_sigmoid(a + b * sg), eps)
+            params[name] = {"a": a, "b": b}
+
+    df_out[out_proba_col] = p
+
+    if convert_threshold is not None:
+        df_out[out_flag_col] = (p >= convert_threshold).astype(int)
+
+    return df_out, params
 
