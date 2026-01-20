@@ -1,4 +1,4 @@
-# Credit-Risk# Credit Risk (End-to-End ML Pipeline)
+# Credit Risk (End-to-End ML Pipeline)
 
 This repository demonstrates an end-to-end workflow for credit risk modelling in Python, covering the full model lifecycle:
 data preparation → feature engineering → feature selection → modelling → evaluation → deployment-style scoring → monitoring.
