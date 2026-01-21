@@ -708,6 +708,8 @@ def group_performance_one_rule(
 #    Rule Summary Table Builder
 #==============================================
 
+import numpy as np
+import pandas as pd
 from typing import Callable, Dict, Iterable, Optional, Union, Any
 
 def build_rule_summary_table(
@@ -721,7 +723,7 @@ def build_rule_summary_table(
     balance_col: Optional[str] = None,
     rule_to_mask: Optional[Callable[[pd.DataFrame, Any], pd.Series]] = None,
     performance_expects_mask: bool = True,
-):
+) -> pd.DataFrame:
     """
     Build a policy summary table where each row represents:
       - BASELINE (row 1)
@@ -883,16 +885,7 @@ def build_rule_summary_table(
     return out
 
 
-#    rules = {
+#rules = {
 #    "R1: high util": mask_r1,
-#    "R2: dpd>=10": mask_r2,
+#   "R2: dpd>=10": mask_r2,
 #}
-#summary = build_rule_summary_table(
-#    data=df,
-#    rules=rules,
-#    rule_performance_simple_records=rule_performance_simple_records,
-#    baseline=baseline_mask,
-#    bad_flag_col="bad_flag",
-#    balance_col="bad_bal",
-#    performance_expects_mask=True,
-#)
