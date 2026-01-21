@@ -721,7 +721,7 @@ def build_rule_summary_table(
     balance_col: Optional[str] = None,
     rule_to_mask: Optional[Callable[[pd.DataFrame, Any], pd.Series]] = None,
     performance_expects_mask: bool = True,
-) -> pd.DataFrame:
+):
     """
     Build a policy summary table where each row represents:
       - BASELINE (row 1)
