@@ -11,11 +11,10 @@ data preparation → feature engineering → feature selection → modelling →
 - **Monitoring** (post-deployment drift / performance tracking)
 - **Rule search & evaluation** (decision-rule exploration)
 
-## Project structure (recommended)
-- `src/` core code (feature engineering, modelling, evaluation, monitoring)
-- `docs/` documents and checklists
-- `notebooks/` experiments / EDA (optional)
-- `configs/` parameters (optional)
+## Project structure 
+- `feature_prepare/` feature engineering
+- `ML_rules/` ML Rule construction and evalution
+- `models/` modelling, evaluation and monitoring
 
 ## Quickstart
 ```bash
